@@ -2,7 +2,7 @@
 
 **Autor:** Juan Diego Chaparro García  
 **Stack:** YOLOv11 · EasyOCR · PaddleOCR · Streamlit · Roboflow · Google Colab
-**Streamlit:** [App](https://modelo-de-deteccion-deplacas-colombianas-yolo11-easyocr-xfzab3.streamlit.app/).
+**Streamlit:** [App](https://modelo-de-deteccion-deplacas-colombianas-yolo11-easyocr-xfzab3.streamlit.app/)
 
 ---
 
