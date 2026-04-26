@@ -78,6 +78,29 @@ html, body, [class*="css"] {
   font-family:'Share Tech Mono',monospace; font-size:2.6rem;
   letter-spacing:.3em; color:var(--accent); text-shadow:0 0 12px var(--accent);
 }
+.plate-tokens {
+  display:flex; justify-content:center; align-items:center; gap:.6rem;
+  margin-top:.5rem;
+}
+.token-letters {
+  font-family:'Share Tech Mono',monospace; font-size:1.5rem;
+  letter-spacing:.2em; color:#00d4ff;
+  background:rgba(0,212,255,.1); border:1px solid rgba(0,212,255,.4);
+  border-radius:6px; padding:.3rem .9rem;
+  text-shadow:0 0 8px rgba(0,212,255,.6);
+}
+.token-sep {
+  font-family:'Share Tech Mono',monospace; font-size:1.5rem;
+  color:var(--muted);
+}
+.token-digits {
+  font-family:'Share Tech Mono',monospace; font-size:1.5rem;
+  letter-spacing:.2em; color:#00ff9d;
+  background:rgba(0,255,157,.1); border:1px solid rgba(0,255,157,.4);
+  border-radius:6px; padding:.3rem .9rem;
+  text-shadow:0 0 8px rgba(0,255,157,.6);
+}
+.token-label { font-size:.7rem; color:var(--muted); letter-spacing:1px; text-transform:uppercase; margin-top:.2rem; }
 .plate-label { font-size:.75rem; color:var(--muted); letter-spacing:2px; text-transform:uppercase; }
 .metric-row { display:flex; gap:1rem; flex-wrap:wrap; margin:1rem 0; }
 .metric-chip { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:.6rem 1.2rem; min-width:110px; }
@@ -118,13 +141,13 @@ st.markdown("""
   <p class="hero-sub">
     Sistema inteligente de <strong>detección y lectura de placas vehiculares colombianas</strong>.
     Carga una imagen, un video o activa la cámara — YOLOv8 localiza cada placa
-    y EasyOCR extrae letras y números automáticamente.
+    y EasyOCR extrae letras y números automáticamente en formato <strong>ABC-123</strong>.
     Si hay <strong>varias placas</strong> en la imagen, las detecta todas.
   </p>
   <span class="badge">YOLOv8 Ultralytics</span>
   <span class="badge">EasyOCR</span>
   <span class="badge">Multi-Placa</span>
-  <span class="badge">Tiempo Real</span>
+  <span class="badge">Placas Colombianas</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -132,7 +155,7 @@ with st.expander("📖 ¿Cómo usar esta aplicación?", expanded=False):
     st.markdown("""
     <div class="card">
       <div class="step"><div class="step-num">1</div><div class="step-text">
-        Coloca <code>best.onnx</code> en la misma carpeta que <code>app.py</code>.
+        Coloca <code>best.pt</code> en la misma carpeta que <code>app.py</code>.
       </div></div>
       <div class="step"><div class="step-num">2</div><div class="step-text">
         Elige la fuente: <strong>Imagen</strong>, <strong>Video</strong> o <strong>Cámara Web</strong>.
@@ -144,7 +167,8 @@ with st.expander("📖 ¿Cómo usar esta aplicación?", expanded=False):
         Presiona <strong>Detectar Placa</strong> o toma una foto con la cámara.
       </div></div>
       <div class="step"><div class="step-num">5</div><div class="step-text">
-        Ve la imagen anotada, el texto de cada placa (formato ABC-123) y las métricas.
+        Ve la imagen anotada, las <strong style="color:#00d4ff">letras</strong> y los
+        <strong style="color:#00ff9d">números</strong> separados por token, y las métricas.
       </div></div>
     </div>
     """, unsafe_allow_html=True)
@@ -152,18 +176,17 @@ with st.expander("📖 ¿Cómo usar esta aplicación?", expanded=False):
 # ─────────────────────────────────────────────
 #  SIDEBAR
 # ─────────────────────────────────────────────
-MODEL_PATH = "best.onnx"
+MODEL_PATH = "best.pt"
 
 with st.sidebar:
     st.markdown("### ⚙️ Configuración")
     st.markdown("---")
     conf_threshold = st.slider("Umbral de confianza", 0.10, 0.99, 0.45, 0.01)
     iou_threshold  = st.slider("Umbral IoU (NMS)",    0.10, 0.99, 0.45, 0.01)
-    ocr_langs      = st.multiselect("Idiomas OCR", ["es","en","pt","fr","de"], default=["es","en"])
     draw_conf      = st.checkbox("Mostrar confianza en imagen", value=True)
     enhance_crop   = st.checkbox("Mejorar recorte antes del OCR", value=True)
     st.markdown("---")
-    st.markdown("<small style='color:#4a5568'>PlateVision AI · YOLOv8 + EasyOCR</small>",
+    st.markdown("<small style='color:#4a5568'>PlateVision AI · YOLOv8 + EasyOCR<br>🇨🇴 Placas Colombianas ABC-123</small>",
                 unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
@@ -175,45 +198,62 @@ def load_model(path: str):
         return None
     return YOLO(path)
 
+
 @st.cache_resource(show_spinner=False)
-def load_ocr(langs: tuple):
-    return easyocr.Reader(list(langs), gpu=False)
+def load_ocr():
+    return easyocr.Reader(['en'], gpu=False)
+
 
 # ─────────────────────────────────────────────
-#  PREPROCESAMIENTO (pasos del notebook)
+#  PREPROCESAMIENTO
 # ─────────────────────────────────────────────
 def enhance_for_ocr(crop_bgr: np.ndarray) -> np.ndarray:
     """
-    Preprocesa el recorte de la placa siguiendo los mismos pasos
-    del notebook de entrenamiento:
-
-      Paso 1 — Escala de grises (BGR → GRAY)
-      Paso 2 — Upscaling 2x con interpolación CUBIC
-      Paso 3 — CLAHE  (clipLimit=2.0, tileGridSize=8×8)
-      Paso 4 — Filtro bilateral  (d=11, sigmaColor=17, sigmaSpace=17)
-
-    Retorna imagen BGR de 3 canales (EasyOCR acepta ambos formatos).
+    Preprocesa el recorte de la placa:
+      Paso 1 — Escala de grises
+      Paso 2 — Upscaling 2x con INTER_CUBIC
+      Paso 3 — CLAHE (clipLimit=2.0, tileGridSize=8×8)
+      Paso 4 — Filtro bilateral (d=11, sigmaColor=17, sigmaSpace=17)
+    Retorna imagen BGR de 3 canales.
     """
-    # Paso 1 — escala de grises
     gris = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-
-    # Paso 2 — upscaling 2x con INTER_CUBIC
     alto, ancho = gris.shape
-    gris = cv2.resize(gris, (ancho * 2, alto * 2),
-                      interpolation=cv2.INTER_CUBIC)
-
-    # Paso 3 — CLAHE (contraste adaptativo)
+    gris = cv2.resize(gris, (ancho * 2, alto * 2), interpolation=cv2.INTER_CUBIC)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     gris  = clahe.apply(gris)
-
-    # Paso 4 — filtro bilateral (reduce ruido, preserva bordes de caracteres)
-    gris = cv2.bilateralFilter(gris, 11, 17, 17)
-
+    gris  = cv2.bilateralFilter(gris, 11, 17, 17)
     return cv2.cvtColor(gris, cv2.COLOR_GRAY2BGR)
 
 
 # ─────────────────────────────────────────────
-#  LIMPIEZA Y CORRECCIÓN DE PLACA
+#  EASYOCR — EXTRACCIÓN DE TEXTO
+# ─────────────────────────────────────────────
+def run_easyocr(ocr, img_bgr: np.ndarray,
+                min_conf: float = 0.10) -> tuple[list, list]:
+    """
+    Ejecuta EasyOCR sobre un recorte BGR y devuelve
+    (lista_de_textos, lista_de_confianzas).
+    """
+    result = ocr.readtext(img_bgr)
+
+    texts, confs = [], []
+
+    if not result:
+        return texts, confs
+
+    for (bbox, texto, conf) in result:
+        conf = float(conf)
+        if conf >= min_conf:
+            limpio = re.sub(r"[^A-Z0-9]", "", texto.upper())
+            if limpio:
+                texts.append(limpio)
+                confs.append(conf)
+
+    return texts, confs
+
+
+# ─────────────────────────────────────────────
+#  LIMPIEZA DE TEXTO
 # ─────────────────────────────────────────────
 def clean_plate_text(texts: list) -> str:
     """Une tokens OCR y conserva solo caracteres alfanuméricos."""
@@ -221,16 +261,18 @@ def clean_plate_text(texts: list) -> str:
     return re.sub(r"[^A-Z0-9]", "", combined)
 
 
-def correct_colombian_plate(text: str) -> str:
+# ─────────────────────────────────────────────
+#  CORRECCIÓN Y SEPARACIÓN DE PLACA COLOMBIANA
+# ─────────────────────────────────────────────
+def correct_colombian_plate(text: str) -> tuple[str, str, str]:
     """
     Ordena y corrige al formato de placa colombiana: ABC-123
+    Retorna: (placa_formateada, letras, digitos)
+    Ejemplo:  ("ABN-537", "ABN", "537")
 
-    1. Separa todos los caracteres en LETRAS y DÍGITOS.
-    2. Reordena: primero 3 letras, luego 3 dígitos (independientemente
-       del orden en que el OCR los devolvió).
-    3. Si faltan letras, convierte dígitos confundibles (0→O, 1→I, etc.).
-    4. Si faltan dígitos, convierte letras confundibles (O→0, I→1, etc.).
-    5. Rellena con '?' si no hay suficientes caracteres de ningún tipo.
+    Regla fija:
+      - Posiciones 1-3 → siempre LETRAS
+      - Posiciones 4-6 → siempre NÚMEROS
 
     Tablas de confusión OCR:
       Dígito → Letra : 0→O  1→I  8→B  5→S  6→G  2→Z  4→A  7→T
@@ -250,84 +292,75 @@ def correct_colombian_plate(text: str) -> str:
         "U": "0", "V": "7", "F": "7",
     }
 
-    # Separar letras y dígitos tal como llegaron del OCR
-    letras  = [c for c in clean if c.isalpha()]
-    digitos = [c for c in clean if c.isdigit()]
+    letras  = []
+    digitos = []
 
-    # Completar letras desde dígitos sobrantes si faltan
-    while len(letras) < 3 and digitos:
-        candidato = digitos.pop(0)
-        letras.append(digit_to_letter.get(candidato, candidato))
+    for c in clean:
+        if len(letras) < 3:
+            letras.append(c if c.isalpha() else digit_to_letter.get(c, "?"))
+        elif len(digitos) < 3:
+            digitos.append(c if c.isdigit() else letter_to_digit.get(c, "?"))
+        else:
+            break
 
-    # Completar dígitos desde letras sobrantes si faltan
-    while len(digitos) < 3 and len(letras) > 3:
-        candidato = letras.pop(3)          # tomar el 4to carácter letra
-        digitos.insert(0, letter_to_digit.get(candidato, candidato))
+    letras  = (letras  + ["?"] * 3)[:3]
+    digitos = (digitos + ["?"] * 3)[:3]
 
-    # Recortar a 3 de cada tipo y rellenar con '?' si faltan
-    letras  = (letras[:3]  + ["?"] * 3)[:3]
-    digitos = (digitos[:3] + ["?"] * 3)[:3]
+    letras_str  = "".join(letras)
+    digitos_str = "".join(digitos)
 
-    return f"{''.join(letras)}-{''.join(digitos)}"
+    return f"{letras_str}-{digitos_str}", letras_str, digitos_str
 
 
 # ─────────────────────────────────────────────
 #  PIPELINE PRINCIPAL
 # ─────────────────────────────────────────────
-def run_detection(frame_bgr, model, ocr_reader,
+def run_detection(frame_bgr, model, ocr,
                   conf_th=0.45, iou_th=0.45,
                   do_enhance=True, show_conf=True):
     """
     Pipeline completo:
       1. YOLO detecta todas las placas en el frame
-      2. Recorta exactamente el bbox (sin margen)
-      3. Preprocesa con los 4 pasos del notebook (si do_enhance=True)
+      2. Recorta exactamente el bbox
+      3. Preprocesa con los 4 pasos
       4. EasyOCR lee caracteres alfanuméricos
-      5. Ordena letras/dígitos y corrige al formato ABC-123
+      5. Separa y corrige letras/números al formato ABC-123
       6. Anota el frame con cajas y texto
     """
     results = model(frame_bgr, conf=conf_th, iou=iou_th, verbose=False)[0]
 
-    boxes = results.boxes.xyxy.cpu().numpy()
-    confs = results.boxes.conf.cpu().numpy()
+    boxes      = results.boxes.xyxy.cpu().numpy()
+    det_confs  = results.boxes.conf.cpu().numpy()
 
     annotated   = frame_bgr.copy()
     plates_info = []
 
-    for (x1, y1, x2, y2), conf in zip(boxes, confs):
+    for (x1, y1, x2, y2), conf in zip(boxes, det_confs):
         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
-        # Recorte exacto — sin margen
         crop = frame_bgr[y1:y2, x1:x2]
         if crop.size == 0:
             continue
 
-        # Preprocesar (4 pasos del notebook)
         crop_ocr = enhance_for_ocr(crop) if do_enhance else crop
 
-        # EasyOCR
-        ocr_results = ocr_reader.readtext(
-            crop_ocr,
-            allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            detail=1,
-            paragraph=False,
-            width_ths=1.0,
-            height_ths=1.0,
-        )
+        texts, confs_ocr = run_easyocr(ocr, crop_ocr, min_conf=0.10)
 
         print(f"\n[DEBUG] Crop shape: {crop_ocr.shape}")
-        print(f"[DEBUG] OCR raw: {ocr_results}")
+        print(f"[DEBUG] EasyOCR texts: {texts}  confs: {confs_ocr}")
 
-        texts     = [r[1] for r in ocr_results if r[2] > 0.10]
-        confs_ocr = [r[2] for r in ocr_results if r[2] > 0.10]
+        raw_text = clean_plate_text(texts)
 
-        raw_text     = clean_plate_text(texts)
-        plate        = correct_colombian_plate(raw_text) if raw_text else "— SIN TEXTO —"
+        if raw_text:
+            plate, letras, digitos = correct_colombian_plate(raw_text)
+        else:
+            plate, letras, digitos = "— SIN TEXTO —", "—", "—"
+
         avg_ocr_conf = float(np.mean(confs_ocr)) if confs_ocr else 0.0
 
-        print(f"[DEBUG] raw='{raw_text}'  →  plate='{plate}'")
+        print(f"[DEBUG] raw='{raw_text}'  →  plate='{plate}'  letras='{letras}'  digitos='{digitos}'")
 
-        # ── Dibujar ────────────────────────────────────────────────────
+        # Dibujar bbox y etiqueta
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 212, 255), 2)
         label = f"{plate}  {conf:.0%}" if show_conf else plate
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.7, 1)
@@ -341,6 +374,8 @@ def run_detection(frame_bgr, model, ocr_reader,
             "bbox"      : (x1, y1, x2, y2),
             "det_conf"  : float(conf),
             "plate_text": plate,
+            "letters"   : letras,
+            "digits"    : digitos,
             "raw_texts" : texts,
             "ocr_conf"  : avg_ocr_conf,
             "crop_rgb"  : cv2.cvtColor(crop, cv2.COLOR_BGR2RGB),
@@ -349,6 +384,7 @@ def run_detection(frame_bgr, model, ocr_reader,
     annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
     return annotated_rgb, plates_info
 
+
 # ─────────────────────────────────────────────
 #  CARGAR MODELO Y OCR
 # ─────────────────────────────────────────────
@@ -356,16 +392,17 @@ with st.spinner("Cargando modelo YOLOv8…"):
     model = load_model(MODEL_PATH)
 
 with st.spinner("Iniciando EasyOCR…"):
-    ocr_reader = load_ocr(tuple(ocr_langs) if ocr_langs else ("es", "en"))
+    ocr_reader = load_ocr()
 
 if model is None:
     st.error(
         f"⚠️ No se encontró `{MODEL_PATH}` en la carpeta del proyecto. "
-        "Asegúrate de que **best.onnx** esté en la misma carpeta que app.py."
+        "Asegúrate de que **best.pt** esté en la misma carpeta que app.py."
     )
     st.stop()
 else:
     st.success(f"✅ Modelo cargado — `{MODEL_PATH}`", icon="🤖")
+
 
 # ─────────────────────────────────────────────
 #  RENDER RESULTADOS
@@ -379,12 +416,27 @@ def render_results(annotated_rgb, plates_info):
             st.warning("No se detectaron placas en esta imagen.")
             return
         for idx, info in enumerate(plates_info, 1):
-            st.markdown(f"<div class='card-title'>Placa #{idx}</div>", unsafe_allow_html=True)
-            plate_str = info["plate_text"]
+            st.markdown(f"<div class='card-title'>Placa #{idx}</div>",
+                        unsafe_allow_html=True)
+            plate_str  = info["plate_text"]
+            letras_str = info["letters"]
+            digits_str = info["digits"]
+
             st.markdown(f"""
             <div class='plate-box'>
               <div class='plate-text'>{plate_str}</div>
-              <div class='plate-label'>PLACA DETECTADA · Formato ABC-123</div>
+              <div class='plate-label'>PLACA DETECTADA · 🇨🇴 Formato ABC-123</div>
+              <div class='plate-tokens'>
+                <div>
+                  <div class='token-letters'>{letras_str}</div>
+                  <div class='token-label'>letras</div>
+                </div>
+                <div class='token-sep'>—</div>
+                <div>
+                  <div class='token-digits'>{digits_str}</div>
+                  <div class='token-label'>números</div>
+                </div>
+              </div>
             </div>
             <div class='metric-row'>
               <div class='metric-chip'>
@@ -396,8 +448,12 @@ def render_results(annotated_rgb, plates_info):
                 <div class='metric-lbl'>OCR Conf.</div>
               </div>
               <div class='metric-chip'>
-                <div class='metric-val'>{len(info['plate_text'].replace('-',''))}</div>
-                <div class='metric-lbl'>Caracteres</div>
+                <div class='metric-val' style='color:#00d4ff;letter-spacing:.15em'>{letras_str}</div>
+                <div class='metric-lbl'>Letras</div>
+              </div>
+              <div class='metric-chip'>
+                <div class='metric-val' style='color:#00ff9d;letter-spacing:.15em'>{digits_str}</div>
+                <div class='metric-lbl'>Números</div>
               </div>
             </div>
             """, unsafe_allow_html=True)
@@ -405,8 +461,11 @@ def render_results(annotated_rgb, plates_info):
                 with st.expander("Ver tokens OCR crudos"):
                     for t in info["raw_texts"]:
                         st.code(t, language=None)
-            st.image(info["crop_rgb"], caption=f"Recorte placa #{idx}", use_container_width=True)
-            st.markdown("<hr style='border-color:#1e2d3d;margin:1rem 0'>", unsafe_allow_html=True)
+            st.image(info["crop_rgb"], caption=f"Recorte placa #{idx}",
+                     use_container_width=True)
+            st.markdown("<hr style='border-color:#1e2d3d;margin:1rem 0'>",
+                        unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────────
 #  TABS
@@ -420,7 +479,7 @@ with tab_img:
     st.markdown("<div class='card-title'>Subir Imagen</div>", unsafe_allow_html=True)
     uploaded_img = st.file_uploader(
         "Arrastra o selecciona una imagen",
-        type=["jpg","jpeg","png","bmp","webp"], key="img_up"
+        type=["jpg", "jpeg", "png", "bmp", "webp"], key="img_up"
     )
     if uploaded_img:
         file_bytes = np.frombuffer(uploaded_img.read(), np.uint8)
@@ -464,7 +523,7 @@ with tab_vid:
     st.markdown("<div class='card-title'>Subir Video</div>", unsafe_allow_html=True)
     uploaded_vid = st.file_uploader(
         "Arrastra o selecciona un video",
-        type=["mp4","avi","mov","mkv","webm"], key="vid_up"
+        type=["mp4", "avi", "mov", "mkv", "webm"], key="vid_up"
     )
     if uploaded_vid:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -526,10 +585,21 @@ with tab_vid:
             if all_plates:
                 unique = list({p["plate_text"] for p in all_plates if p["plate_text"]})
                 st.markdown("### 📋 Placas únicas detectadas en el video")
-                for pl in unique:
+                for pl_info in {p["plate_text"]: p for p in all_plates}.values():
                     st.markdown(f"""
                     <div class='plate-box' style='margin:.4rem 0'>
-                      <div class='plate-text' style='font-size:1.8rem'>{pl}</div>
+                      <div class='plate-text' style='font-size:1.8rem'>{pl_info['plate_text']}</div>
+                      <div class='plate-tokens'>
+                        <div>
+                          <div class='token-letters' style='font-size:1.1rem'>{pl_info['letters']}</div>
+                          <div class='token-label'>letras</div>
+                        </div>
+                        <div class='token-sep'>—</div>
+                        <div>
+                          <div class='token-digits' style='font-size:1.1rem'>{pl_info['digits']}</div>
+                          <div class='token-label'>números</div>
+                        </div>
+                      </div>
                     </div>
                     """, unsafe_allow_html=True)
             else:
@@ -570,11 +640,24 @@ with tab_cam:
 
             if plates:
                 for idx, info in enumerate(plates, 1):
-                    plate_str = info["plate_text"]
+                    plate_str  = info["plate_text"]
+                    letras_str = info["letters"]
+                    digits_str = info["digits"]
                     st.markdown(f"""
                     <div class='plate-box'>
                       <div class='plate-text'>{plate_str}</div>
-                      <div class='plate-label'>PLACA #{idx} · ABC-123</div>
+                      <div class='plate-label'>PLACA #{idx} · 🇨🇴 ABC-123</div>
+                      <div class='plate-tokens'>
+                        <div>
+                          <div class='token-letters'>{letras_str}</div>
+                          <div class='token-label'>letras</div>
+                        </div>
+                        <div class='token-sep'>—</div>
+                        <div>
+                          <div class='token-digits'>{digits_str}</div>
+                          <div class='token-label'>números</div>
+                        </div>
+                      </div>
                     </div>
                     <div class='metric-row'>
                       <div class='metric-chip'>
@@ -585,11 +668,19 @@ with tab_cam:
                         <div class='metric-val'>{info['ocr_conf']:.0%}</div>
                         <div class='metric-lbl'>OCR</div>
                       </div>
+                      <div class='metric-chip'>
+                        <div class='metric-val' style='color:#00d4ff;letter-spacing:.15em'>{letras_str}</div>
+                        <div class='metric-lbl'>Letras</div>
+                      </div>
+                      <div class='metric-chip'>
+                        <div class='metric-val' style='color:#00ff9d;letter-spacing:.15em'>{digits_str}</div>
+                        <div class='metric-lbl'>Números</div>
+                      </div>
                     </div>
                     """, unsafe_allow_html=True)
             else:
                 st.warning("No se detectó ninguna placa. Intenta bajar el umbral de confianza.")
 
-    if cam_img is not None and "plates" in dir() and plates:
+    if cam_img is not None and plates:
         st.markdown("**Frame anotado:**")
         st.image(annotated, use_container_width=True)
