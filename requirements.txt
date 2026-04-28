@@ -28,8 +28,6 @@ narwhals==2.20.0
 networkx==3.6.1
 ninja==1.13.0
 numpy==2.0.0
-opencv-contrib-python-headless==4.13.0.92
-opencv-python==4.13.0.92
 opencv-python-headless==4.13.0.92
 packaging==26.2
 pandas==3.0.2
